@@ -583,7 +583,7 @@ class MetabaseClient:
         metadata = self.api(
             "get",
             f"/api/database/{database_id}/metadata",
-            params={"include_hidden": True},
+            params={"include_hidden": true},
         )
 
         bigquery_schema = metadata.get("details", {}).get("dataset-id")
