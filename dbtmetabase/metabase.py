@@ -13,6 +13,7 @@ class Metabase:
     def __init__(
         self,
         url: str,
+        api_key: Optional[str],
         username: Optional[str],
         password: Optional[str],
         session_id: Optional[str],
@@ -38,19 +39,24 @@ class Metabase:
             http_adapter or HTTPAdapter(max_retries=Retry(total=3, backoff_factor=1)),
         )
 
-        if not session_id:
-            if username and password:
-                session = dict(
-                    self._api(
-                        method="post",
-                        path="/api/session",
-                        json={"username": username, "password": password},
-                    )
+        if api_key:
+            self.session.headers["X-API-KEY"] = api_key
+        elif username and password:
+            session = dict(
+                self._api(
+                    method="post",
+                    path="/api/session",
+                    json={"username": username, "password": password},
                 )
-                session_id = str(session["id"])
-            else:
-                raise ArgumentError("Metabase credentials or session ID required")
-        self.session.headers["X-Metabase-Session"] = session_id
+            )
+            self.session.headers["X-Metabase-Session"] = str(session["id"])
+        elif session_id:
+            _logger.warning(
+                "Metabase session ID is deprecated and will be removed in future, use API key or username/password instead"
+            )
+            self.session.headers["X-Metabase-Session"] = session_id
+        else:
+            raise ArgumentError("Metabase API key or username/password required")
 
         _logger.info("Metabase session established")
 
@@ -89,9 +95,13 @@ class Metabase:
 
         return response_json
 
+    def get_databases(self) -> Sequence[Mapping]:
+        """Retrieves all databases."""
+        return list(self._api("get", "/api/database"))
+
     def find_database(self, name: str) -> Optional[Mapping]:
         """Finds database by name attribute or returns none."""
-        for api_database in list(self._api("get", "/api/database")):
+        for api_database in self.get_databases():
             if api_database["name"].upper() == name.upper():
                 return api_database
         return None
@@ -112,7 +122,12 @@ class Metabase:
 
     def get_tables(self) -> Sequence[Mapping]:
         """Retrieves all tables for all databases."""
-        return list(self._api("get", "/api/table"))
+        return list(
+            filter(
+                lambda x: "details" in x["db"],  # exclude internal
+                self._api("get", "/api/table"),
+            )
+        )
 
     def get_collections(self, exclude_personal: bool) -> Sequence[Mapping]:
         """Retrieves all collections and optionally filters out personal collections."""
@@ -178,6 +193,13 @@ class Metabase:
         except requests.exceptions.HTTPError as error:
             if error.response.status_code == 404:
                 _logger.warning("User '%s' not found", uid)
+                return None
+            elif (
+                error.response.status_code == 400
+                and "internal user" in error.response.text
+            ):
+                # Since X.50.0 fetching internal user raises 400 Not able to modify the internal user
+                _logger.warning("User '%s' is internal", uid)
                 return None
             raise
 

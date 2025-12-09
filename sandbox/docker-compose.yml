@@ -1,10 +1,8 @@
-version: "3"
-
 name: dbt-metabase-sandbox
 
 services:
   postgres:
-    image: postgres:16
+    image: postgres:16.4
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-}
@@ -13,6 +11,8 @@ services:
       - ${POSTGRES_PORT}:5432
     networks:
       - common
+    volumes:
+      - ./postgres-initdb:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $POSTGRES_USER"]
       interval: 5s
@@ -22,13 +22,16 @@ services:
     restart: always
 
   metabase:
-    image: metabase/metabase:latest
+    image: metabase/metabase:v0.57.x
     environment:
       - MB_SETUP_TOKEN=${MB_SETUP_TOKEN:-}
+      - MB_DB_FILE=/metabase-data/metabase.db
     ports:
       - ${MB_PORT}:3000
     networks:
       - common
+    volumes:
+      - ./metabase.db:/metabase-data/metabase.db
     healthcheck:
       test: ["CMD-SHELL", "curl --fail http://localhost:3000/api/health"]
       interval: 10s

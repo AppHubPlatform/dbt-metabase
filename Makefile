@@ -1,109 +1,102 @@
-build: clean
-	python3 -m build
-.PHONY: build
+export SETUPTOOLS_SCM_PRETEND_VERSION ?= 0.0.0
 
+.PHONY: dependencies
+dependencies:
+	uv sync --no-install-project --all-extras --frozen
+
+.PHONY: upgrade
+upgrade:
+	uv sync --no-install-project --all-extras --upgrade
+
+.PHONY: build
+build: clean
+	uv run python3 -m build
+
+.PHONY: clean
 clean:
 	rm -rf build dist
-.PHONY: clean
 
-requirements:
-	python3 -m pip install \
-		-r requirements.txt \
-		-r requirements-test.txt
-.PHONY: requirements
-
-fix-fmt:
-	black .
-.PHONY: fix-fmt
-
-fix-imports:
-	isort .
-.PHONY: fix-imports
-
-fix: fix-fmt fix-imports
 .PHONY: fix
+fix:
+	uv run ruff format .
+	uv run ruff check --fix .
 
-check-fmt:
-	black --check .
-.PHONY: check-fmt
+.PHONY: check-lint
+check-lint:
+	uv run ruff format --check .
+	uv run ruff check .
 
-check-imports:
-	isort --check .
-.PHONY: check-imports
-
-check-lint-python:
-	pylint dbtmetabase
-.PHONY: check-lint-python
-
-check-type:
-	mypy dbtmetabase
 .PHONY: check-type
+check-type:
+	uv run pyright dbtmetabase
 
-check: check-fmt check-imports check-lint-python check-type
 .PHONY: check
+check: check-lint check-type
 
-test:
-	python3 -m unittest tests
 .PHONY: test
+test:
+	rm -rf tests/tmp
+	uv run pytest tests
 
-pre: fix check test
 .PHONY: pre
+pre: fix check test
 
-dist-check: build
-	twine check dist/*
 .PHONY: dist-check
+dist-check: build
+	uv run twine check dist/*
 
-dist-upload: check
-	twine upload dist/*
 .PHONY: dist-upload
+dist-upload: check
+	uv run twine upload dist/*
 
-install: build
-	python3 -m pip uninstall -y dbt-metabase \
-		&& python3 -m pip install dist/dbt_metabase-*-py3-none-any.whl
 .PHONY: install
+install: build
+	uv pip uninstall dbt-metabase \
+		&& uv pip install dist/dbt_metabase-*-py3-none-any.whl
 
+.PHONY: sandbox-up
 sandbox-up:
-	( cd sandbox && docker-compose up --build --attach app )
-.PHONY: sandbox-up
+	( cd sandbox && docker compose up --build --attach app )
 
+.PHONY: sandbox-down
 sandbox-down:
-	( cd sandbox && docker-compose down )
-.PHONY: sandbox-up
+	( cd sandbox && docker compose down )
 
+.PHONY: sandbox-models
 sandbox-models:
-	( source sandbox/.env && python3 -m dbtmetabase models \
+	( . sandbox/.env && uv run python3 -m dbtmetabase models \
 		--manifest-path sandbox/target/manifest.json \
 		--metabase-url http://localhost:$$MB_PORT \
 		--metabase-username $$MB_USER \
 		--metabase-password $$MB_PASSWORD \
 		--metabase-database $$POSTGRES_DB \
-		--include-schemas "pub*",other \
+		--include-schemas "pub*",inventory \
 		--http-header x-dummy-key dummy-value \
 		--order-fields \
 		--verbose )
-.PHONY: sandbox-models
 
+.PHONY: sandbox-exposures
 sandbox-exposures:
 	rm -rf sandbox/models/exposures
 	mkdir -p sandbox/models/exposures
-	( source sandbox/.env && python3 -m dbtmetabase exposures \
+	( . sandbox/.env && uv run python3 -m dbtmetabase exposures \
 		--manifest-path sandbox/target/manifest.json \
 		--metabase-url http://localhost:$$MB_PORT \
 		--metabase-username $$MB_USER \
 		--metabase-password $$MB_PASSWORD \
 		--output-path sandbox/models/exposures \
 		--output-grouping collection \
+		--tag metabase \
 		--verbose )
 	
-	( source sandbox/.env && cd sandbox && \
+	( . sandbox/.env && cd sandbox && \
 		POSTGRES_HOST=localhost \
 		POSTGRES_PORT=$$POSTGRES_PORT \
 		POSTGRES_USER=$$POSTGRES_USER \
 		POSTGRES_PASSWORD=$$POSTGRES_PASSWORD \
 		POSTGRES_DB=$$POSTGRES_DB \
 		POSTGRES_SCHEMA=$$POSTGRES_SCHEMA \
-		dbt docs generate )
-.PHONY: sandbox-exposures
+		uv run dbt docs generate )
 
-sandbox-e2e: sandbox-up sandbox-models sandbox-exposures sandbox-down
 .PHONY: sandbox-e2e
+sandbox-e2e: sandbox-up sandbox-models sandbox-exposures sandbox-down

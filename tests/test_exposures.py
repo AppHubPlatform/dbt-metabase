@@ -1,95 +1,125 @@
-import unittest
 from operator import itemgetter
 from pathlib import Path
 
+import pytest
 import yaml
 
-from ._mocks import FIXTURES_PATH, TMP_PATH, MockDbtMetabase
+from dbtmetabase._exposures import _Context, _Exposure
+from tests._mocks import FIXTURES_PATH, TMP_PATH, MockDbtMetabase
 
 
-class TestExposures(unittest.TestCase):
-    def setUp(self):
-        self.c = MockDbtMetabase()
-        TMP_PATH.mkdir(exist_ok=True)
+def _assert_exposures(expected_path: Path, actual_path: Path):
+    with open(expected_path, encoding="utf-8") as f:
+        expected = yaml.safe_load(f)
+    with open(actual_path, encoding="utf-8") as f:
+        actual = yaml.safe_load(f)
 
-    def _assert_exposures(self, expected_path: Path, actual_path: Path):
-        with open(expected_path, encoding="utf-8") as f:
-            expected = yaml.safe_load(f)
-        with open(actual_path, encoding="utf-8") as f:
-            actual = yaml.safe_load(f)
+    assert actual["exposures"] == sorted(expected["exposures"], key=itemgetter("name"))
 
-        self.assertEqual(
-            sorted(expected["exposures"], key=itemgetter("name")),
-            actual["exposures"],
-        )
 
-    def test_exposures(self):
-        fixtures_path = FIXTURES_PATH / "exposure" / "default"
-        output_path = TMP_PATH / "exposure" / "default"
-        self.c.extract_exposures(
-            output_path=str(output_path),
-            output_grouping=None,
-        )
+def test_exposures_default(core: MockDbtMetabase):
+    fixtures_path = FIXTURES_PATH / "exposure" / "default"
+    output_path = TMP_PATH / "exposure" / "default"
+    core.extract_exposures(
+        output_path=str(output_path),
+        output_grouping=None,
+        tags=["metabase"],
+    )
 
-        self._assert_exposures(
-            fixtures_path / "exposures.yml",
-            output_path / "exposures.yml",
-        )
+    _assert_exposures(
+        fixtures_path / "exposures.yml",
+        output_path / "exposures.yml",
+    )
 
-    def test_exposures_collection_grouping(self):
-        fixtures_path = FIXTURES_PATH / "exposure" / "collection"
-        output_path = TMP_PATH / "exposure" / "collection"
-        self.c.extract_exposures(
-            output_path=str(output_path),
-            output_grouping="collection",
-        )
 
-        self._assert_exposures(
-            fixtures_path / "a_look_at_your_customers_table.yml",
-            output_path / "a_look_at_your_customers_table.yml",
-        )
-        self._assert_exposures(
-            fixtures_path / "our_analytics.yml",
-            output_path / "our_analytics.yml",
-        )
+def test_exposures_collection_grouping(core: MockDbtMetabase):
+    fixtures_path = FIXTURES_PATH / "exposure" / "collection"
+    output_path = TMP_PATH / "exposure" / "collection"
+    core.extract_exposures(
+        output_path=str(output_path),
+        output_grouping="collection",
+    )
 
-    def test_exposures_grouping_type(self):
-        fixtures_path = FIXTURES_PATH / "exposure" / "type"
-        output_path = TMP_PATH / "exposure" / "type"
-        self.c.extract_exposures(
-            output_path=str(output_path),
-            output_grouping="type",
-        )
+    for file in fixtures_path.iterdir():
+        _assert_exposures(file, output_path / file.name)
 
-        for i in [*range(1, 18), 24]:
-            self._assert_exposures(
-                fixtures_path / "card" / f"{i}.yml",
-                output_path / "card" / f"{i}.yml",
-            )
 
-        for i in range(1, 2):
-            self._assert_exposures(
-                fixtures_path / "dashboard" / f"{i}.yml",
-                output_path / "dashboard" / f"{i}.yml",
-            )
+def test_exposures_grouping_type(core: MockDbtMetabase):
+    fixtures_path = FIXTURES_PATH / "exposure" / "type"
+    output_path = TMP_PATH / "exposure" / "type"
+    core.extract_exposures(
+        output_path=str(output_path),
+        output_grouping="type",
+    )
 
-    def test_exposures_aliased_ref(self):
-        for model in self.c.manifest.read_models():
-            if not model.name.startswith("stg_"):
-                model.alias = f"{model.name}_alias"
+    for file in (fixtures_path / "card").iterdir():
+        _assert_exposures(file, output_path / "card" / file.name)
 
-        aliases = [m.alias for m in self.c.manifest.read_models()]
-        self.assertIn("orders_alias", aliases)
-        self.assertIn("customers_alias", aliases)
+    for file in (fixtures_path / "dashboard").iterdir():
+        _assert_exposures(file, output_path / "dashboard" / file.name)
 
-        fixtures_path = FIXTURES_PATH / "exposure" / "default"
-        output_path = TMP_PATH / "exposure" / "aliased"
-        self.c.extract_exposures(
-            output_path=str(output_path),
-            output_grouping=None,
-        )
 
-        self._assert_exposures(
-            fixtures_path / "exposures.yml",
-            output_path / "exposures.yml",
-        )
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        (
+            "SELECT * FROM database.schema.table0",
+            {"database.schema.table0"},
+        ),
+        (
+            "SELECT * FROM schema.table0",
+            {"database.schema.table0"},
+        ),
+        (
+            "SELECT * FROM table1",
+            {"database.public.table1"},
+        ),
+        (
+            'SELECT * FROM "schema".table0',
+            {"database.schema.table0"},
+        ),
+        (
+            'SELECT * FROM schema."table0"',
+            {"database.schema.table0"},
+        ),
+        (
+            'SELECT * FROM "schema"."table0"',
+            {"database.schema.table0"},
+        ),
+        (
+            "SELECT * FROM `schema.table0`",
+            {"database.schema.table0"},
+        ),
+    ],
+)
+def test_extract_exposures_native_depends(
+    core: MockDbtMetabase,
+    query: str,
+    expected: set,
+):
+    ctx = _Context(
+        model_refs={
+            "database.schema.table0": "model0",
+            "database.public.table1": "model1",
+        },
+        database_names={1: "database"},
+        table_names={},
+    )
+    exposure = _Exposure(
+        model="card",
+        uid="",
+        label="",
+    )
+    core._exposure_card(
+        ctx=ctx,
+        exposure=exposure,
+        card={
+            "dataset_query": {
+                "type": "native",
+                "database": 1,
+                "native": {"query": query},
+            }
+        },
+    )
+    assert expected == exposure.depends
+    assert query == exposure.native_query

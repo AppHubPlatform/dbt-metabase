@@ -13,11 +13,11 @@ from .metabase import Metabase
 
 _logger = logging.getLogger(__name__)
 
+_SYNC_PERIOD = 5
+
 
 class ModelsMixin(metaclass=ABCMeta):
     """Abstraction for exporting models."""
-
-    __SYNC_PERIOD = 5
 
     DEFAULT_MODELS_SYNC_TIMEOUT = 30
 
@@ -57,7 +57,7 @@ class ModelsMixin(metaclass=ABCMeta):
             order_fields (bool, optional): Preserve column order in dbt project.
         """
 
-        ctx = self.__Context()
+        ctx = _Context()
         success = True
 
         database = self.metabase.find_database(name=metabase_database)
@@ -77,17 +77,24 @@ class ModelsMixin(metaclass=ABCMeta):
         deadline = int(time.time()) + sync_timeout
         synced = False
         while not synced:
-            time.sleep(self.__SYNC_PERIOD)
+            time.sleep(_SYNC_PERIOD)
 
-            tables = self.__get_tables(database["id"])
+            tables = self._get_metabase_tables(database["id"])
 
             synced = True
             for model in models:
                 schema_name = model.schema.upper()
                 model_name = model.alias.upper()
-                table_key = f"{schema_name}.{model_name}"
+                schema_table_key = f"{schema_name}.{model_name}"
+                table = tables.get(schema_table_key)
+                table_key = schema_table_key
 
-                table = tables.get(table_key)
+                # Fallback for multi-database connections: try database.schema.table format
+                if not table and model.database:
+                    database_schema_table_key = model.alias_path.upper()
+                    if table := tables.get(database_schema_table_key):
+                        table_key = database_schema_table_key
+
                 if not table:
                     _logger.warning(
                         "Table '%s' not in schema '%s'", table_key, schema_name
@@ -100,10 +107,19 @@ class ModelsMixin(metaclass=ABCMeta):
 
                     field = table.get("fields", {}).get(column_name)
                     if not field:
+                        if table.get("visibility_type") is not None:
+                            table_label = "hidden table"
+                            table["stale"] = True
+                        else:
+                            table_label = "table"
+                            synced = False
+
                         _logger.warning(
-                            "Field '%s' not in table '%s'", column_name, table_key
+                            "Field '%s' not in %s '%s'",
+                            column_name,
+                            table_label,
+                            table_key,
                         )
-                        synced = False
                         continue
 
             ctx.tables = tables
@@ -115,7 +131,7 @@ class ModelsMixin(metaclass=ABCMeta):
             raise MetabaseStateError("Unable to sync models with Metabase")
 
         for model in models:
-            success &= self.__export_model(
+            success &= self._export_model(
                 ctx=ctx,
                 model=model,
                 append_tags=append_tags,
@@ -150,9 +166,9 @@ class ModelsMixin(metaclass=ABCMeta):
         if not success:
             raise MetabaseStateError("Non-critical errors encountered, see above")
 
-    def __export_model(
+    def _export_model(
         self,
-        ctx: __Context,
+        ctx: _Context,
         model: Model,
         append_tags: bool,
         docs_url: Optional[str],
@@ -164,9 +180,31 @@ class ModelsMixin(metaclass=ABCMeta):
 
         schema_name = model.schema.upper()
         model_name = model.alias.upper()
-        table_key = f"{schema_name}.{model_name}"
+        schema_table_key = f"{schema_name}.{model_name}"
 
-        api_table = ctx.tables.get(table_key)
+        api_table = ctx.tables.get(schema_table_key)
+        table_key = schema_table_key
+
+        _logger.debug(
+            "Looking for model: database=%s, schema=%s, alias=%s",
+            model.database,
+            model.schema,
+            model.alias,
+        )
+        _logger.debug("Trying schema.table key: %s", schema_table_key)
+
+        # Fallback for multi-database connections: try database.schema.table format
+        if not api_table and model.database:
+            database_schema_table_key = model.alias_path.upper()
+            _logger.debug("Trying multi-database key: %s", database_schema_table_key)
+            api_table = ctx.tables.get(database_schema_table_key)
+            if api_table:
+                table_key = database_schema_table_key
+            else:
+                _logger.debug(
+                    "Multi-database key not found: %s", database_schema_table_key
+                )
+
         if not api_table:
             _logger.error("Table '%s' does not exist", table_key)
             return False
@@ -177,6 +215,13 @@ class ModelsMixin(metaclass=ABCMeta):
         model_points_of_interest = model.points_of_interest or None
         model_caveats = model.caveats or None
         model_visibility = model.visibility_type or None
+
+        # Going from hidden to visible may require a retry
+        retryable = (
+            api_table.get("visibility_type") is not None
+            and model_visibility is None
+            and api_table.get("stale", False)
+        )
 
         body_table = {}
 
@@ -205,31 +250,39 @@ class ModelsMixin(metaclass=ABCMeta):
         else:
             _logger.info("Table '%s' is up to date", table_key)
 
+        if model_visibility is not None:
+            _logger.info("Table '%s' is hidden, skipping columns", table_key)
+            return success
+
         for column in model.columns:
             success &= self.__export_column(
                 ctx,
-                schema_name=schema_name,
-                model_name=model_name,
+                table_key=table_key,
                 column=column,
             )
 
         if order_fields:
-            success &= self.__export_model_column_order(
+            self.__export_model_column_order(
                 ctx=ctx,
                 model=model,
                 api_table=api_table,
                 table_key=table_key,
             )
 
+        if not success and retryable:
+            _logger.error(
+                "Table '%s' got stale while hidden, retrying may help", table_key
+            )
+
         return success
 
     def __export_model_column_order(
         self,
-        ctx: __Context,
+        ctx: _Context,
         model: Model,
         api_table: Mapping,
         table_key: str,
-    ) -> bool:
+    ):
         """Exports model column order to Metabase field order."""
 
         api_ord = {}
@@ -270,29 +323,24 @@ class ModelsMixin(metaclass=ABCMeta):
                 if dbt_only:
                     details.append(f"missing in Metabase {dbt_only}")
 
-                _logger.error(
+                _logger.warning(
                     "Table field order '%s' mismatch: %s",
                     table_key,
                     ", ".join(details),
                 )
-                return False
-
-        return True
 
     def __export_column(
         self,
-        ctx: __Context,
-        schema_name: str,
-        model_name: str,
+        ctx: _Context,
+        table_key: str,
         column: Column,
     ) -> bool:
         """Exports one dbt column to Metabase database schema."""
 
         success = True
 
-        table_key = f"{schema_name}.{model_name}"
         column_name = column.name.upper()
-        column_label = f"{schema_name}.{model_name}.{column_name}"
+        column_label = f"{table_key}.{column_name}"
 
         api_field = ctx.get_field(table_key, column_name)
         if not api_field:
@@ -321,6 +369,23 @@ class ModelsMixin(metaclass=ABCMeta):
                     table_key=fk_target_table_name,
                     field_key=fk_target_field_name,
                 )
+
+                # Fallback for multi-database connections: try database.schema.table format
+                if not fk_target_field and fk_target_table_name.count(".") < 2:
+                    database_part = table_key.split(".")[0]
+                    fk_target_table_with_database = (
+                        f"{database_part}.{fk_target_table_name}"
+                    )
+                    _logger.debug(
+                        "Trying multi-database FK: %s -> %s",
+                        fk_target_table_name,
+                        fk_target_table_with_database,
+                    )
+                    fk_target_field = ctx.get_field(
+                        table_key=fk_target_table_with_database,
+                        field_key=fk_target_field_name,
+                    )
+
                 if fk_target_field:
                     fk_target_field_id = fk_target_field.get("id")
                     if fk_target_field.get(semantic_type_key) != "type/PK":
@@ -387,6 +452,10 @@ class ModelsMixin(metaclass=ABCMeta):
         settings = api_field.get("settings") or {}
         if settings.get("number_style") != column.number_style and column.number_style:
             settings["number_style"] = column.number_style
+        if settings.get("decimals") != column.decimals and column.decimals:
+            settings["decimals"] = column.decimals
+        if settings.get("currency") != column.currency and column.currency:
+            settings["currency"] = column.currency
 
         if settings:
             body_field["settings"] = settings
@@ -408,7 +477,7 @@ class ModelsMixin(metaclass=ABCMeta):
 
         return success
 
-    def __get_tables(self, database_id: str) -> Mapping[str, MutableMapping]:
+    def _get_metabase_tables(self, database_id: str) -> Mapping[str, MutableMapping]:
         tables = {}
 
         metadata = self.metabase.get_database_metadata(database_id)
@@ -435,12 +504,30 @@ class ModelsMixin(metaclass=ABCMeta):
 
             schema_name = table["schema"].upper()
             table_name = table["name"].upper()
+
+            # Handle database.schema.table format when database info is available
+            # Check if table has database information
+            database_name = None
+
+            # Extract database name from table["db"]
+            if table_db := table.get("db"):
+                db_parts = str(table_db).split(".")
+                if len(db_parts) >= 2:
+                    # Multi-database connections: "database.schema" format
+                    database_name = db_parts[0].upper()
+                else:
+                    # Single database: just the database name
+                    database_name = str(table_db).upper()
+
+            if database_name:
+                schema_name = f"{database_name}.{schema_name}"
+
             tables[f"{schema_name}.{table_name}"] = new_table
 
         return tables
 
-    @staticmethod
     def __filtered_models(
+        self,
         models: Iterable[Model],
         database_filter: Optional[Filter],
         schema_filter: Optional[Filter],
@@ -457,25 +544,26 @@ class ModelsMixin(metaclass=ABCMeta):
 
         return list(filter(selected, models))
 
-    @dc.dataclass
-    class __Context:
-        tables: Mapping[str, MutableMapping] = dc.field(default_factory=dict)
-        updates: MutableMapping[str, MutableMapping] = dc.field(default_factory=dict)
 
-        def get_field(self, table_key: str, field_key: str) -> MutableMapping:
-            return self.tables.get(table_key, {}).get("fields", {}).get(field_key, {})
+@dc.dataclass
+class _Context:
+    tables: Mapping[str, MutableMapping] = dc.field(default_factory=dict)
+    updates: MutableMapping[str, MutableMapping] = dc.field(default_factory=dict)
 
-        def update(self, entity: MutableMapping, change: Mapping, label: str):
-            entity.update(change)
+    def get_field(self, table_key: str, field_key: str) -> MutableMapping:
+        return self.tables.get(table_key, {}).get("fields", {}).get(field_key, {})
 
-            key = f"{entity['kind']}.{entity['id']}"
-            update = self.updates.get(key, {})
-            update["kind"] = entity["kind"]
-            update["id"] = entity["id"]
-            update["label"] = label
+    def update(self, entity: MutableMapping, change: Mapping, label: str):
+        entity.update(change)
 
-            body = update.get("body", {})
-            body.update(change)
-            update["body"] = body
+        key = f"{entity['kind']}.{entity['id']}"
+        update = self.updates.get(key, {})
+        update["kind"] = entity["kind"]
+        update["id"] = entity["id"]
+        update["label"] = label
 
-            self.updates[key] = update
+        body = update.get("body", {})
+        body.update(change)
+        update["body"] = body
+
+        self.updates[key] = update

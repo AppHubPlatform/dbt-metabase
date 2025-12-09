@@ -2,10 +2,6 @@
 
 This project would not be here without its community, so contributions have and will always be welcome!
 
-## Questions
-
-If you have a **question** or an **idea**, please ensure it does not already exist and create a [discussion](https://github.com/gouline/dbt-metabase/discussions) under the appropriate category. This makes accepted answers and conversations available to others in the same situation.
-
 ## Issues
 
 When reporting a bug, please create an [issue](https://github.com/gouline/issues) and provide as much content as humanly possible:
@@ -20,7 +16,7 @@ When reporting a bug, please create an [issue](https://github.com/gouline/issues
 
 Code contributions must be reviewed by the maintainer in a [pull request](https://github.com/gouline/pulls). This project only has one maintainer, so please be patient if the review process takes days or weeks.
 
-Unless your change is a bug fix or an incremental addition, consider proposing your approach in a discussion or an issue first. While your contributions are appreciated, not everything is suitable for this project, and seeking feedback in advance avoids wasting your time implementing something that gets rejected.
+Unless your change is a bug fix or an incremental addition, consider proposing your approach in an issue first. While your contributions are appreciated, not everything is suitable for this project, and seeking feedback in advance avoids wasting your time implementing something that gets rejected.
 
 ### Validation
 
@@ -68,6 +64,16 @@ Once you are finished, stop the sandbox:
 ```
 make sandbox-down
 ```
+
+#### Recording
+
+Whenever tests require updating Metabase API fixtures, you need to "record" them from the running sandbox instance by executing:
+
+```
+RECORD=true make test
+```
+
+This will run tests against the actual Metabase instance, instead of fixtures, and write those responses to new fixtures. **Many tests will likely fail**, because of timestamps and other transient data, so you need to manually fix those assertions.
 
 ## Code of Conduct
 

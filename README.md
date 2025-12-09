@@ -1,10 +1,9 @@
 # dbt-metabase
 
-[![GitHub Actions](https://github.com/gouline/dbt-metabase/actions/workflows/master.yml/badge.svg)](https://github.com/gouline/dbt-metabase/actions/workflows/master.yml)
 [![PyPI](https://img.shields.io/pypi/v/dbt-metabase)](https://pypi.org/project/dbt-metabase/)
-[![Downloads](https://pepy.tech/badge/dbt-metabase)](https://pepy.tech/project/dbt-metabase)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/gouline/dbt-metabase/blob/master/LICENSE)
-[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/gouline/dbt-metabase/blob/main/LICENSE)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
 
 Integration between [dbt](https://www.getdbt.com/) and [Metabase](https://www.metabase.com/).
 
@@ -13,6 +12,8 @@ If dbt is your source of truth for database schemas and you use Metabase as your
 ## Requirements
 
 Requires Python 3.8 or above.
+
+For development, you will need [uv](https://docs.astral.sh/uv/getting-started/installation/) installed.
 
 ## Usage
 
@@ -36,6 +37,15 @@ Once `dbt compile` finishes, `manifest.json` can be found in the `target/` direc
 
 See [dbt documentation](https://docs.getdbt.com/docs/running-a-dbt-project/run-your-dbt-projects) for more information.
 
+## Metabase API
+
+All commands require authentication against the [Metabase API](https://www.metabase.com/docs/latest/api-documentation) using one of these methods:
+
+* API key (`--metabase-api-key`) 
+  - Strongly **recommended** for automation, see [documentation](https://www.metabase.com/docs/latest/people-and-groups/api-keys) (Metabase 49 or later).
+* Username and password (`--metabase-username` / `--metabase-password`)
+  - Fallback for older versions of Metabase and smaller instances.
+
 ## Exporting Models
 
 Let's start by defining a short sample `schema.yml` as below.
@@ -47,7 +57,7 @@ models:
     columns:
       - name: id
         description: Primary key.
-        tests:
+        data_tests:
           - not_null
           - unique
 
@@ -56,18 +66,19 @@ models:
 
       - name: group_id
         description: Foreign key to user group.
-        tests:
+        data_tests:
           - not_null
           - relationships:
-              to: ref('groups')
-              field: id
+              arguments:
+                to: ref('groups')
+                field: id
 
   - name: stg_groups
     description: User groups.
     columns:
       - name: id
         description: Primary key.
-        tests:
+        data_tests:
           - not_null
           - unique
 
@@ -81,8 +92,7 @@ This is already enough to propagate the primary keys, foreign keys and descripti
 dbt-metabase models \
     --manifest-path target/manifest.json \
     --metabase-url https://metabase.example.com \
-    --metabase-username user@example.com \
-    --metabase-password Password123 \
+    --metabase-api-key mb_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX= \
     --metabase-database business \
     --include-schemas public
 ```
@@ -98,9 +108,10 @@ Native [relationship tests](https://docs.getdbt.com/reference/resource-propertie
 ```yaml
 - name: country_id
   description: FK to User's country in the dim_countries table.
-  meta:
-    metabase.fk_target_table: analytics_dims.dim_countries
-    metabase.fk_target_field: id
+  config:
+    meta:
+      metabase.fk_target_table: analytics_dims.dim_countries
+      metabase.fk_target_field: id
 ```
 
 You can provide `fk_target_table` as `schema_name.table_name` or just `table_name` to use the current schema. If your model has an alias, provide that alias rather than the original name.
@@ -112,8 +123,9 @@ Now that we have foreign keys configured, let's tell Metabase that `email` colum
 ```yaml
 - name: email
   description: User's email address.
-  meta:
-    metabase.semantic_type: type/Email
+  config:
+    meta:
+      metabase.semantic_type: type/Email
 ```
 
 Once you run `dbt-metabase models` again, you will notice that `email` column is now marked as "Email".
@@ -150,9 +162,10 @@ Here is how you would hide that email column:
 ```yaml
 - name: email
   description: User's email address.
-  meta:
-    metabase.semantic_type: type/Email
-    metabase.visibility_type: sensitive
+  config:
+    meta:
+      metabase.semantic_type: type/Email
+      metabase.visibility_type: sensitive
 ```
 
 Below are the visibility types supported for columns:
@@ -176,20 +189,23 @@ In addition to foreign keys, semantic types and visibility types, Metabase also 
 
 ```yaml
 - name: model_name
-  meta:
-    metabase.display_name: another_model_name
-    metabase.visibility_type: normal
-    metabase.points_of_interest: Relevant records.
-    metabase.caveats: Sensitive information about users.
+  config:
+    meta:
+      metabase.display_name: another_model_name
+      metabase.visibility_type: normal
+      metabase.points_of_interest: Relevant records.
+      metabase.caveats: Sensitive information about users.
   columns:
     - name: column_name
-      meta:
-        metabase.display_name: another_column_name
-        metabase.visibility_type: sensitive
-        metabase.semantic_type: type/Number
-        metabase.has_field_values: list
-        metabase.coercion_strategy: keyword
-        metabase.number_style: decimal
+      config:
+        meta:
+          metabase.display_name: another_column_name
+          metabase.visibility_type: sensitive
+          metabase.semantic_type: type/Number
+          metabase.has_field_values: list
+          metabase.coercion_strategy: keyword
+          metabase.number_style: decimal
+          metabase.decimals: 3
 ```
 
 See [Metabase documentation](https://www.metabase.com/docs/latest/api) for details and accepted values.
@@ -208,8 +224,7 @@ dbt-metabase allows you to extract questions and dashboards from Metabase as [db
 dbt-metabase exposures \
     --manifest-path ./target/manifest.json \
     --metabase-url https://metabase.example.com \
-    --metabase-username user@example.com \
-    --metabase-password Password123 \
+    --metabase-api-key mb_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX= \
     --output-path models/ \
     --exclude-collections "temp*"
 ```
@@ -259,8 +274,7 @@ A configuration file can be created in `~/.dbt-metabase/config.yml` for dbt-meta
 config:
     manifest_path: target/manifest.json
     metabase_url: https://metabase.example.com
-    metabase_username: user@example.com
-    metabase_password: Password123
+    metabase_api_key: mb_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX=
     # Configuration specific to models command
     models:
       metabase_database: business
@@ -282,8 +296,7 @@ from dbtmetabase import DbtMetabase, Filter
 c = DbtMetabase(
     manifest_path="target/manifest.json",
     metabase_url="https://metabase.example.com",
-    metabase_username="user@example.com",
-    metabase_password="Password123",
+    metabase_api_key="mb_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX=",
 )
 
 # Exporting models
